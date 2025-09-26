@@ -1,35 +1,124 @@
 # Enhanced Quantum Neural Network Project
 
-This project explores **Quantum Machine Learning (QML)** models for binary classification on the Kaggle *Cardiovascular Disease* dataset. It benchmarks a classical NN baseline, several pure-QML templates, and two hybrid quantum–classical models: **EnhancedQNN** and **DeepHybridQNN**.
+A practical, VS Code–friendly playground for **Quantum Machine Learning (QML)** on the Kaggle **Cardiovascular Disease** dataset.  
+You can compare a compact **classical neural net**, several **pure QML circuits**, a concise **EnhancedQNN (1Q+3C)**, and a deeper **DeepHybridQNN (3Q+3C)**—all on the **same preprocessing** for a fair comparison.
 
-> Scripts are VS Code–friendly (non-interactive plotting) and save all artifacts to `./outputs`.
-
----
-
-## 📌 Features
-- **Robust data pipeline**
-  - Auto-detect semicolon/comma delimiters for CSV.
-  - Cleanups: convert age (days → years); clamp blood pressure to sane ranges.
-  - MinMax scaling; stratified train/test split.
-- **Models Implemented**
-  - **Classical baseline**: small 2‑layer MLP.
-  - **QML templates (4‑qubit)**: `BasicEntanglerLayers`, `StronglyEntanglingLayers`, `RandomLayers`, `AmplitudeEmbedding`.
-  - **EnhancedQNN (1Q + 3C)**: Quantum front-end → Dense(8) → Dense(4) → Out (logits).
-  - **DeepHybridQNN (3Q + 3C)**: Q1→C1→Q2→C2→Q3→C3→Out; supports `--dropout_p`, `--use_layernorm`, `--half_angles`, and MI/PCA-based quantum inputs.
-- **Evaluation**
-  - Accuracy, confusion matrix PNGs, and classification reports.
-  - Run summaries exported as CSVs in `./outputs`.
+> All artifacts (plots, CSVs) are saved to `./outputs`. Scripts use non-interactive Matplotlib backends.
 
 ---
 
-## 📂 Repository Structure
+## 🎯 Objectives
+- Provide **clean baselines** (classical + multiple QML templates).
+- Demonstrate **hybrid quantum–classical** models where a quantum front‑end feeds a classical head.
+- Keep experiments **reproducible** (fixed seeds) and **portable** (PyTorch + PennyLane).
+
+---
+
+## 📦 Repository Layout
 ```
 ├── QML_model_enhanced.py       # Baselines + EnhancedQNN runner
 ├── QML_model_deep_hybrid.py    # DeepHybridQNN vs EnhancedQNN vs Classical
 ├── cardio_train.csv            # Sample CSV (Kaggle cardio subset)
-├── outputs/                    # Confusion matrices & summary CSVs
-└── README.md                   # You are here
+├── outputs/                    # Confusion matrices (.png) & summaries (.csv)
+└── README.md                   # This file
 ```
+
+---
+
+## 🧠 Dataset & Preprocessing
+**Dataset**: Kaggle *Cardiovascular Disease* training CSV (`cardio_train.csv`).
+
+**Features (11)**: `age, gender, height, weight, ap_hi, ap_lo, cholesterol, gluc, smoke, alco, active`  
+**Target (1)**: `cardio` (0/1)
+
+**Preprocessing (shared by all experiments):**
+- **Delimiter auto-detect**: try comma; if the CSV collapses to one column, retry with `sep=";"`.
+- **Sanity fixes**: `age` from *days → years*; clamp blood pressure to `ap_hi∈[60,240]`, `ap_lo∈[30,150]`.
+- **Split & scale**: stratified 80/20 split; `MinMaxScaler` on features.
+
+**Quantum input builders (choose one):**
+- **MI top‑k (default)**: select the top `k = n_qubits` features using mutual information (supervised, simple).
+- **PCA → AmplitudeEmbedding (`--amp_embed`)**: project to `2^n_qubits` principal components and feed as a normalized amplitude vector.
+
+---
+
+## 🧩 Models — What They Are & How They Work
+
+### 1) Classical Baseline (small MLP)
+**Why**: establish a reference using *all 11 features*.  
+**Architecture**:
+```
+Input(11) → Linear(11→H) → ReLU → Linear(H→2) → Softmax
+```
+- `H = max(6, in_dim)` (scales with feature count).
+- **Loss**: CrossEntropyLoss (multi-class over {0,1}).
+- **Optimizer**: Adagrad (simple & stable for small nets).
+
+---
+
+### 2) Pure QML Templates (4‑qubit heads)
+Each QML model encodes a length‑`n_qubits` vector `x` into a quantum state, applies a parametrized circuit, and **measures Pauli‑Z expectations** on each wire:
+\
+`f_θ(x) = [⟨Z₀⟩, ⟨Z₁⟩, …, ⟨Z_{n_q-1}⟩]`  
+The result is then mapped to 2 logits via a linear layer + Softmax.
+
+Common readout head:
+```
+QuantumExpectations(n_qubits) → Linear(n_qubits→2) → Softmax
+```
+
+**Templates included:**
+- **BasicEntanglerLayers**  
+  - *Encoding*: `AngleEmbedding(x)` (rotations per qubit).  
+  - *Ansatz*: layers of single‑qubit rotations + ring entanglers.  
+  - *Use case*: fast baseline with modest expressive power.
+- **StronglyEntanglingLayers**  
+  - Deeper circuit with stronger entanglement patterns.  
+  - *Effect*: higher capacity at the cost of train stability; depth set via `weights` repetitions.
+- **RandomLayers**  
+  - Pseudorandom parametrized layers (seeded).  
+  - *Use case*: stress‑test whether structured entanglement matters for your data.
+- **AmplitudeEmbedding**  
+  - *Encoding*: normalized amplitude vector (dimension `2^n_qubits`).  
+  - *When `--amp_embed` is enabled*: inputs come from PCA to match amplitude dimension.  
+  - *Effect*: global, compact encoding that can capture more variance at small qubit counts.
+
+**Training**: like the classical baseline (CrossEntropyLoss), but the forward pass is differentiable through the QNode (PennyLane `TorchLayer`).
+
+---
+
+### 3) EnhancedQNN (1Q + 3C) — *compact hybrid*
+**Idea**: use a **single quantum block** to extract a non-linear representation, then process with a small classical head for binary logits.
+
+**Block diagram**:
+```
+x (k dims)
+ └─→ [QBlock: Angle/Amplitude + StronglyEntanglingLayers] → z ∈ ℝ^{n_qubits}
+      → ReLU → Linear(nq→8) → ReLU → Linear(8→4) → Linear(4→1) (logit)
+```
+- **Embedding**: default `AngleEmbedding` on MI top‑k features; optional `AmplitudeEmbedding` with PCA.  
+- **Loss**: `BCEWithLogitsLoss` (numerically stable).  
+- **Why it works**: the quantum layer can reshape feature interactions; the classical head aggregates them into a decision boundary with low parameter count.
+
+---
+
+### 4) DeepHybridQNN (3Q + 3C) — *stacked hybrid with stabilizers*
+**Idea**: alternate **three** quantum blocks with classical transforms, allowing information to be iteratively re‑encoded and re‑entangled.
+
+**Macro architecture**:
+```
+x → Q1 → C1 → (angle_squash) → Q2 → C2 → Dropout → (angle_squash) → Q3 → C3(→4) → Out(→1 logit)
+```
+- **Q blocks**: each is `Angle/AmplitudeEmbedding + StronglyEntanglingLayers` (depth via `--q_reps_block`).  
+- **C blocks**: linear transforms matching `n_qubits` width (`C1`, `C2`) + a `C3` projection to 4 dims.  
+- **Stabilizers**:
+  - `angle_squash`: `x ← tanh(x) * cap`, with `cap ∈ {π, π/2}` (use `--half_angles` for ±π/2) to keep angles in a reasonable range and reduce saturation.
+  - Optional **LayerNorm** after `C1`/`C2` (`--use_layernorm`) to stabilize distributional shifts.
+  - **Dropout** after `C2` (`--dropout_p`) to regularize.  
+- **Loss**: `BCEWithLogitsLoss`.
+
+**Why stack?**  
+Alternating Q/C blocks lets the model *re-embed* intermediate features into the quantum state space, potentially capturing higher‑order interactions that a single Q block might miss.
 
 ---
 
@@ -56,17 +145,6 @@ If you already have a `requirements.txt`, use it. Otherwise:
 ```bash
 pip install numpy pandas torch scikit-learn matplotlib seaborn pennylane
 ```
-
-> **Note (Windows/OneDrive):** If you see “git not recognized” or path issues, add `C:\Program Files\Git\cmd` to PATH and restart VS Code/terminal.
-
----
-
-## 🗂 Dataset
-- Uses the Kaggle *Cardiovascular Disease* dataset (`cardio_train.csv`).
-- Expected columns:
-  - Features (11): `age, gender, height, weight, ap_hi, ap_lo, cholesterol, gluc, smoke, alco, active`
-  - Target: `cardio` (0/1)
-- The scripts auto-switch to `sep=";"` if the file is semicolon-delimited.
 
 ---
 
@@ -108,11 +186,11 @@ python QML_model_deep_hybrid.py \
   --outdir ./outputs
 ```
 **Useful flags**
-- `--model {all,classical,enhanced,deep}`: choose subset to run.
-- `--half_angles`: squash angles to ±π/2 before Q2/Q3 (stability).
+- `--model {all,classical,enhanced,deep}`: run a subset.
+- `--half_angles`: use ±π/2 caps before Q2/Q3 (`angle_squash`) to reduce saturation.
 - `--dropout_p 0.15`: dropout after C2.
 - `--use_layernorm`: LayerNorm after C1/C2.
-- `--amp_embed`: Use PCA → `2^n_qubits` comps with AmplitudeEmbedding instead of MI+AngleEmbedding.
+- `--amp_embed`: switch to PCA + `AmplitudeEmbedding` instead of MI + `AngleEmbedding`.
 
 **Outputs**
 - `outputs/cm_classical.png`, `cm_enhanced_qnn.png`, `cm_deep_hybrid_qnn.png` (depending on `--model`)
@@ -120,81 +198,33 @@ python QML_model_deep_hybrid.py \
 
 ---
 
-## 🔧 CLI Reference
-
-### `QML_model_enhanced.py`
-| Arg | Type | Default | Description |
-|---|---|---:|---|
-| `--csv` | str | `./cardio_train.csv` | Path to dataset (auto-detects `;`) |
-| `--epochs` | int | `20` | CE epochs for baselines |
-| `--enhanced_epochs` | int | `15` | BCE epochs for EnhancedQNN |
-| `--lr` | float | `5e-3` | LR for baselines |
-| `--enhanced_lr` | float | `1e-2` | LR for EnhancedQNN |
-| `--outdir` | str | `./outputs` | Output directory |
-
-### `QML_model_deep_hybrid.py`
-| Arg | Type | Default | Description |
-|---|---|---:|---|
-| `--csv` | str | `./cardio_train.csv` | Path to dataset |
-| `--epochs_classical` | int | `20` | Classical epochs |
-| `--epochs_enhanced` | int | `25` | EnhancedQNN epochs |
-| `--epochs_deep` | int | `25` | DeepHybridQNN epochs |
-| `--lr_classical` | float | `5e-3` | LR for classical |
-| `--lr_enhanced` | float | `5e-3` | LR for EnhancedQNN |
-| `--lr_deep` | float | `1e-3` | LR for DeepHybridQNN |
-| `--n_qubits` | int | `4` | Qubits / quantum features |
-| `--q_reps_enh` | int | `8` | Depth for EnhancedQNN’s Q block |
-| `--q_reps_block` | int | `6` | Depth for each Q block in deep model |
-| `--batch_size` | int | `256` | Batch size for hybrid models |
-| `--half_angles` | flag | `False` | Use ±π/2 caps before Q2/Q3 |
-| `--dropout_p` | float | `0.15` | Dropout after C2 |
-| `--use_layernorm` | flag | `False` | LayerNorm after C1/C2 |
-| `--model` | choice | `all` | `{all,classical,enhanced,deep}` |
-| `--amp_embed` | flag | `False` | Use PCA + AmplitudeEmbedding |
-| `--outdir` | str | `./outputs` | Output directory |
+## 🔬 Training & Evaluation Details
+- **Optimizers**: `Adagrad` for CE baselines; `Adam` for hybrid BCE models.
+- **Losses**:  
+  - CE models (classical & QML templates): `CrossEntropyLoss` (2‑class).  
+  - Hybrid models (Enhanced/Deep): `BCEWithLogitsLoss` with sigmoid at eval time.
+- **Batching**: DataLoader with `batch_size` (default 256 for hybrids).
+- **Metrics**: Accuracy, confusion matrix (PNG), full `classification_report` (printed).
+- **Reproducibility**: `set_seed(42)` (+ deterministic cuDNN flags).
 
 ---
 
-## 🧪 Reproducibility
-- Fixed seed via `set_seed(42)`.
-- Deterministic cuDNN flags.
-- Saved confusion matrices and CSV summaries for auditability.
+## 📈 Artifacts
+All saved to `./outputs`:
+- `cm_*.png` — confusion matrices for each model variant.
+- `summary.csv` — accuracy leaderboard for baselines + EnhancedQNN.
+- `summary_deep_vs_enhanced.csv` — accuracy comparison for classical vs EnhancedQNN vs DeepHybridQNN.
 
 ---
 
-## ⚠️ Troubleshooting
-
-**“git not recognized” in PowerShell/VS Code**
-1) Install Git for Windows. 2) Add `C:\Program Files\Git\cmd` to PATH. 3) Restart terminal.
-
-**Line ending warnings (LF → CRLF)**
-- Safe to ignore, but you can standardize:
-  ```bash
-  git config --global core.autocrlf true
-  ```
-
-**Do not commit `venv/`**
-- Keep `venv/` in `.gitignore` to avoid massive diffs.
-
-**PennyLane / Torch versions**
-- If you hit ABI issues, pin versions (e.g., `pennylane>=0.34`, `torch>=2.1`).
-
----
-
-## 🧭 Notes & Extensions
-- Swap MI top‑k features with PCA + `AmplitudeEmbedding` using `--amp_embed`.
-- Try different `n_qubits` (4, 6, 8) and compare capacity vs overfitting.
-- Explore different optimizers (`Adam`, `Adagrad`) and schedulers.
-- Export trained weights or ONNX for the classical parts if needed.
+## 🧭 Extensions / Ideas
+- Try different `n_qubits` (e.g., 6 or 8) and compare capacity vs overfitting.
+- Explore learning-rate schedules, weight decay, or gradient clipping in hybrids.
+- Swap `StronglyEntanglingLayers` with custom ansätze or hardware-efficient patterns.
+- Evaluate calibration (e.g., reliability diagrams) for the logits from hybrid heads.
+- Add ROC‑AUC/PR‑AUC for class‑imbalance sensitivity.
 
 ---
 
 ## 📜 License
-MIT — feel free to use and modify with attribution.
-
----
-
-## 🙏 Acknowledgements
-- PennyLane for differentiable quantum circuits.
-- scikit-learn for preprocessing & metrics.
-- PyTorch for training utilities.
+MIT — free to use and modify with attribution.
